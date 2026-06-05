@@ -1,64 +1,72 @@
+````markdown
 # FunASR wav2vec-BERT Adapter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Framework](https://img.shields.io/badge/Framework-FunASR-green.svg)](https://github.com/modelscope/FunASR)
 [![Task](https://img.shields.io/badge/Task-Self--Supervised%20Speech%20Pretraining-orange.svg)](#)
 
-A FunASR remote-code adapter for wav2vec2 / w2v-BERT 2.0 style self-supervised speech pretraining.
+A FunASR-compatible remote-code adapter for wav2vec2 / w2v-BERT-style self-supervised speech pretraining.
 
-This project makes wav2vec2 / w2v-BERT pretraining components usable inside the FunASR training stack. It provides model registration, raw-waveform feature extraction, temporal masking, hard Gumbel vector quantization, contrastive learning, codebook prediction, and streaming tar-shard data loading.
+This repository makes wav2vec2 and w2v-BERT pretraining components usable inside the FunASR training stack, including raw-waveform feature extraction, temporal masking, Gumbel vector quantization, contrastive learning, codebook prediction, and streaming tar-shard data loading.
 
-## Highlights
+## ✨ Highlights
 
 - FunASR-compatible `Wav2Vec2Model` and `W2VBertModel`
-- fairseq2-style wav2vec2 / w2v-BERT training semantics
-- hard Gumbel vector quantizer with straight-through gradients
+- Remote-code registration through `++trust_remote_code=true`
+- wav2vec2-style contrastive learning objective
+- w2v-BERT-style codebook prediction objective
+- Hard Gumbel vector quantizer with straight-through gradients
 - Conformer encoder with hidden-state extraction
-- wav2vec2 contrastive loss + w2v-BERT codebook prediction loss
-- streaming tar-shard dataset support for large speech corpora
-- remote-code registration through `++trust_remote_code=true`
-- synthetic model smoke test for forward/backward validation
+- Streaming tar-shard dataset for large-scale speech pretraining
+- Synthetic smoke test for forward/backward validation
 
-## What This Adapter Is
+## 🧩 What This Repository Is
 
-FunASR loads custom model and dataset code through a remote-code mechanism. In this repository, `MODEL_DIR` points to the adapter directory. During training, FunASR receives:
+This repository is a **FunASR remote-code pretraining adapter**, not a standalone ASR toolkit.
+
+It allows FunASR to load custom wav2vec2 / w2v-BERT-style model, encoder, dataset, and dataloader modules at runtime.
+
+In a typical training command, the adapter is passed to FunASR as:
 
 ```bash
 ++model="${MODEL_DIR}"
 ++trust_remote_code=true
 ++remote_code="${MODEL_DIR}"
-```
+````
 
-FunASR imports the Python modules in this directory, which executes the registration code in `__init__.py`, `models/`, `encoder/`, and `datasets/`. After that, names such as `W2VBertModel`, `Wav2Vec2Model`, `SDConformerEncoder`, `SelfSupervisedLargeAudioDataset`, and `DataloaderIterable` are available through FunASR's registry.
+After registration, FunASR can instantiate components such as:
 
-This is not a FunASR plugin package. It is a remote-code model/dataset adapter loaded by the FunASR trainer.
+* `W2VBertModel`
+* `Wav2Vec2Model`
+* `SDConformerEncoder`
+* `SelfSupervisedLargeAudioDataset`
+* `DataloaderIterable`
 
-## Architecture
+## 🏗️ Architecture
 
 ```text
 raw waveform
   -> CNN feature extractor
-  -> post-extraction normalization
-  -> projection
+  -> feature projection and normalization
   -> temporal masking
   -> Conformer encoder
   -> wav2vec2 contrastive branch
   -> w2v-BERT codebook prediction branch
-  -> FunASR trainer
+  -> total pretraining loss
 ```
 
-The vector quantizer follows the fairseq2-style design:
+The vector quantizer follows a fairseq2-style design:
 
 ```text
 features -> entry_proj -> hard gumbel_softmax -> codebook entries -> quantized targets
 ```
 
-## Repository Layout
+## 📁 Repository Layout
 
 ```text
 .
 ├── __init__.py                     # FunASR remote-code entry
-├── configuration.json              # FunASR-style metadata
+├── configuration.json              # Remote-code metadata
 ├── configs/
 │   ├── w2vbert_pretrain.yaml       # Main pretraining config
 │   └── w2vbert_pretrain_small.yaml # Alternate training config
@@ -70,44 +78,31 @@ features -> entry_proj -> hard gumbel_softmax -> codebook entries -> quantized t
 ├── deepspeed_conf/
 │   └── ds_stage1.json
 ├── encoder/
-│   └── SDConformerEncoder.py       # Conformer encoder with hidden states
+│   └── SDConformerEncoder.py       # Conformer encoder
 ├── models/
 │   ├── wav2vec2/                   # wav2vec2 modules
 │   └── w2vbert/                    # w2v-BERT wrapper
 └── scripts/
-    ├── smoke_forward.py            # Model-only forward/backward test
-    └── train_pretrain.sh           # FunASR training launcher template
+    ├── smoke_forward.py            # Forward/backward smoke test
+    └── train_pretrain.sh           # Training launcher template
 ```
 
-`w2vbert_pretrain_small.yaml` is an alternate training config. It is not a tiny model config: the model dimensions and layer count are still large unless you edit `model_conf`.
+> Note: `w2vbert_pretrain_small.yaml` changes selected training settings. It is not necessarily a small model config unless `model_conf` is also modified.
 
-## Requirements
+## 🚀 Quick Start
 
-Use a recent FunASR checkout and a PyTorch/torchaudio environment that matches your CUDA runtime.
-
-Minimal Python packages:
-
-```bash
-pip install -r requirements.txt
-```
-
-For real multi-GPU training with `funasr/bin/train_ds.py`, install DeepSpeed and verify that it matches your CUDA/PyTorch setup:
-
-```bash
-python -c "import torch; print(torch.__version__)"
-python -c "import deepspeed; print(deepspeed.__version__)"
-```
-
-The smoke test does not require DeepSpeed. Training does.
-
-## How To Use This Adapter
-
-### 1. Clone FunASR And This Repository
+Clone FunASR and this repository:
 
 ```bash
 git clone https://github.com/modelscope/FunASR.git
 git clone <your-repo-url> funasr-wav2vec-bert-adapter
 cd funasr-wav2vec-bert-adapter
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
 ```
 
 Set paths:
@@ -117,13 +112,10 @@ export FUNASR_ROOT=/path/to/FunASR
 export MODEL_DIR=/path/to/funasr-wav2vec-bert-adapter
 ```
 
-`MODEL_DIR` must point to this adapter directory.
-
-### 2. Run The Model Smoke Test
+Run the smoke test:
 
 ```bash
-FUNASR_ROOT=/path/to/FunASR \
-python scripts/smoke_forward.py
+FUNASR_ROOT=/path/to/FunASR python scripts/smoke_forward.py
 ```
 
 Expected output:
@@ -134,9 +126,16 @@ weight: 2
 quantizer_entry_proj_grad: True
 ```
 
-This is a model-only smoke test. It verifies local imports, model construction, forward/backward execution, and quantizer gradients. It does not validate FunASR remote-code loading or dataloader construction.
+The smoke test verifies local imports, model construction, forward/backward execution, and quantizer gradients.
 
-### 3. Prepare Tar-Shard Data
+For multi-GPU training, DeepSpeed is required. You can quickly check your environment with:
+
+```bash
+python -c "import torch; print(torch.__version__)"
+python -c "import deepspeed; print(deepspeed.__version__)"
+```
+
+## 📦 Data Preparation
 
 Create a shard-list file:
 
@@ -146,21 +145,23 @@ Create a shard-list file:
 /path/to/shard_000003.tar
 ```
 
-Each line points to one tar file. Inside each tar shard, audio files are read as independent samples. Supported extensions include:
+Each line points to one tar file. Inside each tar shard, audio files are treated as independent self-supervised training samples.
+
+Supported audio formats:
 
 ```text
 wav, flac, mp3, m4a, ogg, opus, wma
 ```
 
-Optional `.txt` files may exist in the same tar shard, but `SelfSupervisedLargeAudioDataset` ignores text and uses audio only.
+No transcript is required. Optional `.txt` files may exist in the tar shard, but `SelfSupervisedLargeAudioDataset` ignores text and only uses audio.
 
-Important data assumptions:
+Important notes:
 
-- Audio is loaded with `torchaudio.load`.
-- The current dataset does not resample audio.
-- Prepare audio at the sample rate expected by the model config, typically 16 kHz.
-- Multi-channel audio is averaged to mono.
-- `min_wav_len` and `max_wav_len` are measured in raw waveform samples.
+* Audio is loaded with `torchaudio.load`.
+* The dataset does not currently resample audio.
+* Prepare audio at the sample rate expected by the model config, usually 16 kHz.
+* Multi-channel audio is averaged to mono.
+* `min_wav_len` and `max_wav_len` are measured in raw waveform samples.
 
 The dataset yields:
 
@@ -171,7 +172,7 @@ The dataset yields:
 }
 ```
 
-### 4. Configure Training
+## ⚙️ Training
 
 The main config is:
 
@@ -179,22 +180,26 @@ The main config is:
 configs/w2vbert_pretrain.yaml
 ```
 
-Key fields:
+Key config fields:
 
-- `model: W2VBertModel`
-- `dataset: SelfSupervisedLargeAudioDataset`
-- `dataset_conf.dataloader: DataloaderIterable`
-- `dataset_conf.batch_num_epoch`: estimated number of batches per epoch. Required because the dataset is iterable.
-- `dataset_conf.batch_size`: dynamic-batch budget measured in raw waveform samples, not fbank frames.
-- `dataset_conf.batch_type: frame`: the batcher keeps `max_raw_samples_in_batch * num_utterances <= batch_size`.
-- `dataset_conf.sort_size`: buffer size used before length sorting and dynamic batching.
-- `dataset_conf.min_wav_len` / `max_wav_len`: waveform length filters, measured in samples.
+* `model: W2VBertModel`
+* `dataset: SelfSupervisedLargeAudioDataset`
+* `dataset_conf.dataloader: DataloaderIterable`
+* `dataset_conf.batch_num_epoch`
+* `dataset_conf.batch_size`
+* `dataset_conf.batch_type`
+* `dataset_conf.sort_size`
+* `dataset_conf.min_wav_len`
+* `dataset_conf.max_wav_len`
 
-If you delete `batch_num_epoch`, the trainer will fail because it needs an estimated dataloader length.
+Important configuration notes:
 
-### 5. Launch Training
+* `batch_num_epoch` is required because the tar-shard dataset is iterable.
+* `dataset_conf.batch_size` is measured in raw waveform samples, not seconds or fbank frames.
+* `dataset_conf.batch_type: frame` keeps `max_raw_samples_in_batch * num_utterances <= batch_size`.
+* `min_wav_len` and `max_wav_len` are also measured in raw waveform samples.
 
-Set paths:
+Set training paths:
 
 ```bash
 export FUNASR_ROOT=/path/to/FunASR
@@ -205,26 +210,13 @@ export OUTPUT_DIR=/path/to/exp/w2vbert_pretrain
 export CUDA_VISIBLE_DEVICES=0,1
 ```
 
-Launch from any directory:
+Launch training:
 
 ```bash
 bash ${MODEL_DIR}/scripts/train_pretrain.sh
 ```
 
-The script calls:
-
-```bash
-torchrun ... ${FUNASR_ROOT}/funasr/bin/train_ds.py \
-  --config-path ${MODEL_DIR}/configs \
-  --config-name w2vbert_pretrain \
-  ++model="${MODEL_DIR}" \
-  ++trust_remote_code=true \
-  ++remote_code="${MODEL_DIR}" \
-  ++train_data_set_list="${TRAIN_LIST}" \
-  ++valid_data_set_list="${VALID_LIST}"
-```
-
-Override config values with FunASR/Hydra arguments:
+Override config values if needed:
 
 ```bash
 bash ${MODEL_DIR}/scripts/train_pretrain.sh \
@@ -235,7 +227,7 @@ bash ${MODEL_DIR}/scripts/train_pretrain.sh \
   ++optim_conf.lr=4e-5
 ```
 
-### 6. Check Outputs
+## 📊 Outputs
 
 Training outputs are written to `OUTPUT_DIR`.
 
@@ -250,60 +242,45 @@ ${OUTPUT_DIR}/model.pt.ep*
 ${OUTPUT_DIR}/tensorboard/
 ```
 
-Exact checkpoint names depend on your FunASR trainer settings such as `save_checkpoint_interval`, `keep_nbest_models`, and `best_model_criterion`.
+Exact checkpoint names depend on your FunASR trainer settings.
 
-### 7. Use The Checkpoint Downstream
+## 🔁 Downstream Usage
 
-The checkpoint is a pretraining checkpoint for the adapter model. For downstream ASR fine-tuning, load it only into a compatible architecture or write a key-mapping script for the shared encoder/frontend modules.
+The produced checkpoint is a self-supervised pretraining checkpoint for this adapter model.
 
-In FunASR configs, this is typically done through `init_param` for matching modules. This repository does not include a downstream ASR fine-tuning recipe.
+For downstream ASR fine-tuning, load it into a compatible architecture or write a key-mapping script for shared frontend/encoder modules.
 
-## Implementation Notes
+This repository does not currently include a supervised ASR fine-tuning recipe.
 
-The adapter is designed to preserve the important fairseq2 w2v-BERT behavior:
+## 📝 Implementation Notes
 
-- `run_frontend()` extracts masked wav2vec2 features and masked quantizer targets.
-- The Conformer encoder returns all hidden states.
-- An intermediate encoder layer feeds the wav2vec2 contrastive branch.
-- The final encoder output feeds the BERT-style codebook prediction branch.
-- The quantizer uses `entry_proj + entries + hard gumbel_softmax`.
-- The temperature schedule uses `(max_temp, min_temp, decay)`.
-- Diversity loss and feature penalty are scaled by the number of masked targets.
+The adapter preserves important wav2vec2 / w2v-BERT-style pretraining behavior:
 
-## Not Included
+* `run_frontend()` extracts masked wav2vec2 features and masked quantizer targets.
+* The Conformer encoder returns hidden states.
+* An intermediate encoder layer feeds the wav2vec2 contrastive branch.
+* The final encoder output feeds the BERT-style codebook prediction branch.
+* The quantizer uses `entry_proj + entries + hard gumbel_softmax`.
+* Diversity loss and feature penalty are scaled by the number of masked targets.
 
-<<<<<<< HEAD
-1. Prepare unlabeled or weakly labeled speech.
-2. Package audio into tar shards.
-3. Create train and validation shard lists.
-4. Run wav2vec2 / w2v-BERT self-supervised pretraining.
-5. Use the checkpoint to initialize downstream ASR fine-tuning.
+## 🚧 Scope and Limitations
 
-## Not Included
+This repository focuses on self-supervised speech pretraining inside FunASR.
 
-This repository does not include:
+It does not currently include:
 
-- pretrained checkpoints
-- speech datasets
-- tokenizer or BPE models
-- CMVN statistics
-- downstream ASR fine-tuning recipes
-- experiment logs or TensorBoard outputs
+* Prepared speech data
+* Pre-built tar shards
+* Pretrained model weights
+* A supervised ASR fine-tuning recipe
+* A checkpoint conversion script for arbitrary downstream ASR models
 
-## License
+Users need to prepare speech data, package audio into tar shards, create train/validation shard lists, and run pretraining with the provided FunASR configuration.
 
-=======
-This repository does not include:
+## 📄 License and Attribution
 
-- pretrained checkpoints
-- speech datasets
-- tokenizer or BPE models
-- CMVN statistics
-- downstream ASR fine-tuning recipes
-- experiment logs or TensorBoard outputs
+This project is released under the [MIT License](LICENSE) for the original code in this repository.
 
-## License
-This project is released under the [MIT License](LICENSE).
-It adapts code and implementation ideas from FunASR and fairseq2 wav2vec2 / w2v-BERT 2.0 components. Keep copyright headers in copied or adapted source files.
+Parts of the implementation are adapted from or inspired by FunASR and fairseq2 wav2vec2 / w2v-BERT components. Please keep original copyright headers in copied or modified source files.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution details.
