@@ -202,15 +202,3 @@ This project is released under the [MIT License](LICENSE).
 It adapts code and implementation ideas from FunASR and fairseq2 wav2vec2 / w2v-BERT components. Keep copyright headers in copied or adapted source files.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution details.
-
-## Publish To GitHub
-
-```bash
-cd funasr-wav2vec-bert-adapter
-git init
-git add .
-git commit -m "Initial FunASR wav2vec-BERT adapter"
-git branch -M main
-git remote add origin git@github.com:<your-user>/funasr-wav2vec-bert-adapter.git
-git push -u origin main
-```
