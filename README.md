@@ -1,4 +1,4 @@
-````markdown
+
 # FunASR wav2vec-BERT Adapter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
