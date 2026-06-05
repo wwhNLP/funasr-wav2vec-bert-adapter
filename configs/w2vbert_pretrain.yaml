@@ -1,0 +1,190 @@
+# 
+# 这是为 FunASR 翻译的 w2v-bert-600m 配置文件
+#
+
+# 1. 顶层模型 (必须与你 Python 代码中注册的 name 一致)
+model: W2VBertModel
+
+# 2. 模型配置 (会作为 kwargs 传给 W2VBertModel.__init__)
+model_conf:
+  # W2VBertModel 的直接参数
+  num_bert_encoder_layers: 16
+  num_target_codebooks: 1
+  
+  # 【重大修改】w2v2_config 现在包含了 Wav2Vec2Model.__init__ 所需的所有参数
+  w2v2_config:
+    model_dim: 1024 # Wav2Vec2Model 的直接参数
+    final_dim: 768  # Wav2Vec2Model 的直接参数
+    final_proj_bias: true
+    num_distractors: 100
+    logit_temp: 0.1
+    
+    # 【重大修改】对应 Wav2Vec2Frontend 的配置字典
+    frontend_conf:
+      model_dim: 1024
+      feature_grad_scale: 0.0
+      # fairseq2 的 feature_extractor_* 参数需要在这里转换为 frontend 的参数
+      # 【注意】您需要根据您重写的 frontend.py 来填充这里的具体参数
+      feature_dim: 512  #【新添加】
+      
+      feature_extractor_conf: #【新添加】
+        num_fbank_channels: 80
+        fbank_stride: 2
+        feature_dim: 160
+        use_fbank: true
+        layer_norm_features: false
+        #  layer_descs 提供 wav2vec 2.0 的标准 7 层卷积配置
+        layer_descs: [
+          [512, 10, 5],
+          [512, 3, 2],
+          [512, 3, 2],
+          [512, 3, 2],
+          [512, 2, 2],
+          [512, 2, 2],
+          [512, 2, 2],
+        ]
+        bias: false #【新添加】
+        # ... 您 feature_extractor.py 可能需要的其他参数
+      
+      pos_encoder_conf: #【新添加】
+        model_dim: 512 # <-- [修改这里] 从 1024 改为 512
+        pos_encoder_type: "relative"
+        kernel_size: 128 #【新添加】
+        num_groups: 16   #【新添加】
+
+    # 切换到 Conformer Encoder
+    encoder: "SDConformerEncoder" # <-- 使用我们新的支持 Conformer 和随机深度的 Encoder
+    encoder_conf:
+      input_layer: null             # 【重要】Wav2Vec2的Encoder不应再次降采样
+      input_size: 1024              # model_dim
+      output_size: 1024             # 通常与 input_size 相同
+      attention_heads: 16           # num_encoder_attn_heads
+      linear_units: 4096            # ffn_inner_dim
+      num_blocks: 24                # num_encoder_layers
+      dropout_rate: 0.2             # dropout_p  before：0.15
+      positional_dropout_rate: 0.15  # before：0.1
+      attention_dropout_rate: 0.2   # attn_dropout_p before：0.15
+      normalize_before: true        # Conformer 通常使用 pre-norm
+      stochastic_depth_rate: 0.2    # 现在这个参数会被正确使用 before：0.15
+      # --- Conformer 特有参数 ---
+      macaron_style: true
+      use_cnn_module: true
+      cnn_module_kernel: 31
+      
+    # 对应 Masker 的配置
+    masker_conf:
+      model_dim: 1024 # masker 在 1024 维特征上操作
+      temporal_mask_span_len: 10
+      max_temporal_mask_prob: 0.65
+      min_num_temporal_mask_spans: 2
+      spatial_mask_span_len: 10
+      max_spatial_mask_prob: 0.0
+      min_num_spatial_mask_spans: 2
+      
+    #对应 Quantizer 的配置
+    quantizer_conf:
+      model_dim: 512 # quantizer 的输入也是 512 维
+      quantized_dim: 1024
+      num_codebooks: 1
+      num_codebook_entries: 1024
+      codebook_sampling_temperature: [2.0, 0.1, 0.999995]
+
+# 3. Tokenizer (保持不变)
+tokenizer: SentencepiecesTokenizer
+tokenizer_conf:
+  bpemodel: null
+  unk_symbol: <unk>
+  split_with_space: true
+  
+cudnn_deterministic: true
+# 4. Frontend
+frontend: WavFrontend
+frontend_conf:
+  fs: 16000
+  window: "hanning"
+  n_mels: 80
+  win_length: 400 # 25ms
+  hop_length: 160 # 10ms
+  fmin: 20
+  fmax: 7600
+  lfr: 1
+  rfr: 1
+
+# 5. 训练、优化器、调度器 (保持不变)
+train_conf:
+  accum_grad: 4
+  grad_clip: 5
+  max_epoch: 20
+  resume: true
+  val_scheduler_criterion: ["valid", "loss"]
+  best_model_criterion: [["valid", "loss", "min"]]
+  keep_nbest_models: 15
+  log_interval: 1
+  find_unused_parameters: True # <-- 对于你这种嵌套模型，这非常重要！
+
+optim: adamw
+optim_conf:
+  lr: 4.0e-05 # before：3.0e-05 /2e-5  
+  betas: [0.9, 0.98]
+  eps: 1.0e-06
+
+scheduler: WarmupPolynomialDecayLR
+scheduler_conf:
+  warmup_steps: 32000  # 对应 fairseq 的 warmup_updates (总 updates 的 8%)
+  total_steps: 1200000 # 对应 fairseq 的 tpu_num_steps
+  power: 1.5 # before：1.0
+  end_lr: 1e-06  # before: 0 
+
+
+dataset: SelfSupervisedLargeAudioDataset
+dataset_conf:
+  dataloader: DataloaderIterable # 使用IterableDataset加载数据不需要index_ds和batch_sampler，使用DataloaderMapStyle加载数据需要index_ds和batch_sampler
+  batch_num_epoch: 10000 # [FIX B] Provide an estimated number of batches for one epoch
+  # index_ds: SelfSupervisedIndexDSJsonl
+  # batch_sampler: BatchSampler
+  shuffler_size: 200 #打乱样本的缓冲区大小-样本条数
+  batch_size: 500000 # 每个批次大小，fbank_frame
+  batch_type: frame # 不是example类型，是token或frame类型，都是按照“batch_by_which_length”长度动态划分批次
+  # batch_by_which_length: source_len  # 按照哪个长度batch，source_len或target_len
+  # 数据增强参数`
+  sort_size: 500000
+  noise_std: 0.05
+  time_stretch_range: [0.85, 1.15]
+  pitch_shift_range: [-2, 2]
+  # 过滤参数
+  min_wav_len: 48000  # 最小长度为 3s (16kHz采样率)
+  max_wav_len: 960000 # 最大长度为 60s
+  # 加速
+  pin_memory: true
+  num_workers: 2
+  prefetch_factor: 10
+  spec_aug: true
+  spec_aug_conf:
+    num_t_mask: 2      # 时间 Masking 的条数
+    max_t_mask_ratio: 0.08 # 每次时间 Masking 的最大比例 (例如 5%) before：0.05
+    num_f_mask: 2      # 频率 Masking 的条数
+    max_f_mask_width: 27 # 每次频率 Masking 的最大宽度 (假设特征维度是 80 或类似值，需要根据实际特征维度调整)
+# 6. 数据集 (使用你的自监督数据集)
+# dataset: SelfSupervisedAudioDataset 
+# dataset_conf:
+#   index_ds: SelfSupervisedIndexDSJsonl
+#   batch_sampler: BatchSampler
+#   batch_size: 300000
+#   batch_type: "frame"
+#   sort_size: 500000
+#   num_workers: 2
+#   # 数据增强参数
+#   noise_std: 0.05
+#   time_stretch_range: [0.85, 1.15]
+#   pitch_shift_range: [-2, 2]
+#   spec_aug: true
+#   spec_aug_conf:
+#     num_t_mask: 2      # 时间 Masking 的条数
+#     max_t_mask_ratio: 0.08 # 每次时间 Masking 的最大比例 (例如 5%) before：0.05
+#     num_f_mask: 2      # 频率 Masking 的条数
+#     max_f_mask_width: 27 # 每次频率 Masking 的最大宽度 (假设特征维度是 80 或类似值，需要根据实际特征维度调整)
+
+# 7. 验证配置
+val_conf:
+  batch_size: 16
+  max_frames_in_batch: 6000

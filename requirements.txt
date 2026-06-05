@@ -1,0 +1,6 @@
+torch
+torchaudio
+funasr
+hydra-core
+omegaconf
+sentencepiece
