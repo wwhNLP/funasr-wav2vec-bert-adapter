@@ -5,14 +5,14 @@
 [![Framework](https://img.shields.io/badge/Framework-FunASR-green.svg)](https://github.com/modelscope/FunASR)
 [![Task](https://img.shields.io/badge/Task-Self--Supervised%20Speech%20Pretraining-orange.svg)](#)
 
-A FunASR-compatible remote-code adapter for wav2vec2 / w2v-BERT-style self-supervised speech pretraining.
+A FunASR-compatible custom adapter for wav2vec2 / w2v-BERT-style self-supervised speech pretraining.
 
 This repository makes wav2vec2 and w2v-BERT pretraining components usable inside the FunASR training stack, including raw-waveform feature extraction, temporal masking, Gumbel vector quantization, contrastive learning, codebook prediction, and streaming tar-shard data loading.
 
 ## ✨ Highlights
 
 - FunASR-compatible `Wav2Vec2Model` and `W2VBertModel`
-- Remote-code registration through `++trust_remote_code=true`
+- custom component registration through `++trust_remote_code=true`
 - wav2vec2-style contrastive learning objective
 - w2v-BERT-style codebook prediction objective
 - Hard Gumbel vector quantizer with straight-through gradients
@@ -22,7 +22,7 @@ This repository makes wav2vec2 and w2v-BERT pretraining components usable inside
 
 ## 🧩 What This Repository Is
 
-This repository is a **FunASR remote-code pretraining adapter**, not a standalone ASR toolkit.
+This repository is a **FunASR custom pretraining adapter**, not a standalone ASR toolkit.
 
 It allows FunASR to load custom wav2vec2 / w2v-BERT-style model, encoder, dataset, and dataloader modules at runtime.
 
@@ -65,8 +65,8 @@ features -> entry_proj -> hard gumbel_softmax -> codebook entries -> quantized t
 
 ```text
 .
-├── __init__.py                     # FunASR remote-code entry
-├── configuration.json              # Remote-code metadata
+├── __init__.py                     
+├── configuration.json              
 ├── configs/
 │   ├── w2vbert_pretrain.yaml       # Main pretraining config
 │   └── w2vbert_pretrain_small.yaml # Alternate training config
