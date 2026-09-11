@@ -93,6 +93,8 @@ class Wav2Vec2VectorQuantizer(Module):
             .view(batch_size * seq_len, self.num_codebooks, -1)
         )
 
+        code_perplexity = self._compute_prob_perplexity(hard_probs.float().mean(dim=0))
+
         avg_probs = torch.softmax(
             logits.view(batch_size * seq_len, self.num_codebooks, -1).float(),
             dim=-1,
@@ -122,7 +124,7 @@ class Wav2Vec2VectorQuantizer(Module):
         ).view(batch_size, seq_len, -1)
 
         return Wav2Vec2VectorQuantizerOutput(
-            quantized_vectors, probs, prob_perplexity
+            quantized_vectors, probs, prob_perplexity, code_perplexity, temp
         )
 
     def _compute_current_temp(self) -> float:
@@ -167,3 +169,7 @@ class Wav2Vec2VectorQuantizerOutput:
 
     prob_perplexity: Tensor
     """The average probability perplexity of the Gumbel-Softmax distribution."""
+
+
+    code_perplexity: Tensor | None = None
+    temperature: float = 1.0

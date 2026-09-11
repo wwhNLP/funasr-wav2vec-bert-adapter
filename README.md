@@ -7,7 +7,7 @@
 
 A FunASR-compatible custom adapter for wav2vec2 / w2v-BERT-style self-supervised speech pretraining.
 
-This repository makes wav2vec2 and w2v-BERT pretraining components usable inside the FunASR training stack, including raw-waveform feature extraction, temporal masking, Gumbel vector quantization, contrastive learning, codebook prediction, and streaming tar-shard data loading.
+This repository makes wav2vec2 and w2v-BERT pretraining components usable inside the FunASR training stack, including FBANK extraction and stacking, temporal masking, Gumbel vector quantization, contrastive learning, codebook prediction, and streaming tar-shard data loading.
 
 ## ✨ Highlights
 
@@ -43,7 +43,8 @@ After registration, FunASR can instantiate components such as:
 
 * `W2VBertModel`
 * `Wav2Vec2Model`
-* `SDConformerEncoder`
+* `Fairseq2ConformerEncoder` (the default fairseq2-compatible path)
+* `SDConformerEncoder` (legacy path)
 * `SelfSupervisedLargeAudioDataset`
 * `DataloaderIterable`
 
@@ -51,13 +52,14 @@ After registration, FunASR can instantiate components such as:
 
 ```text
 raw waveform
-  -> CNN feature extractor
-  -> feature projection and normalization
+  -> 80-channel Kaldi native FBANK (dataset collator)
+  -> stack adjacent frames: 160 channels, stride 2
+  -> feature LayerNorm and projection to 1024
   -> temporal masking
-  -> Conformer encoder
-  -> wav2vec2 contrastive branch
-  -> w2v-BERT codebook prediction branch
-  -> total pretraining loss
+  -> 24-layer fairseq2 Conformer with relative attention
+       layer 8  -> wav2vec2 contrastive branch
+       layer 24 -> w2v-BERT codebook prediction branch
+  -> summed SSL loss; trainer normalizes by total masked targets
 ```
 
 The vector quantizer follows a fairseq2-style design:
@@ -85,7 +87,8 @@ features -> entry_proj -> hard gumbel_softmax -> codebook entries -> quantized t
 ├── deepspeed_conf/
 │   └── ds_stage1.json
 ├── encoder/
-│   └── SDConformerEncoder.py       # Conformer encoder
+│   ├── fairseq2_conformer.py       # Default Conformer encoder
+│   └── SDConformerEncoder.py       # Legacy encoder
 ├── models/
 │   ├── wav2vec2/                   # wav2vec2 modules
 │   └── w2vbert/                    # w2v-BERT wrapper
@@ -123,6 +126,7 @@ Run the smoke test:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 python scripts/smoke_forward.py --device cuda
+CUDA_VISIBLE_DEVICES=4 python scripts/smoke_forward.py --device cuda --bf16 --config configs/w2vbert_pretrain.yaml
 CUDA_VISIBLE_DEVICES=4 python -m unittest discover -s tests -v
 ```
 
@@ -138,14 +142,15 @@ The smoke test verifies forward/backward execution, quantizer gradients, and val
 The regression suite also covers FP32/BF16, tar sharding and resampling, remote registration,
 and CUDA training/checkpoint resume through the actual launcher. CPU runs skip the launcher test.
 
-The launcher uses FunASR DDP by default for multiple GPUs. To enable DeepSpeed, install it
-and pass `++train_conf.use_deepspeed=true`; ensure its gradient accumulation setting matches
-`train_conf.accum_grad`. You can check your environment with:
+The launcher uses `PretrainingTrainer` for single-GPU PyTorch and multi-GPU DDP.
+It accumulates summed objectives and normalizes gradients by the total masked-target
+count across microbatches and ranks before clipping. Validation uses the same target
+weighting. DeepSpeed/FSDP currently raise an explicit error because their sharded
+optimizer paths need a separate normalization adapter. Epoch batch counts, resume
+steps and checkpoint intervals must lie on gradient accumulation boundaries.
 
-```bash
-python -c "import torch; print(torch.__version__)"
-python -c "import deepspeed; print(deepspeed.__version__)"
-```
+Direct comparisons against pinned fairseq2 source are described in
+[FAIRSEQ2_ALIGNMENT.md](FAIRSEQ2_ALIGNMENT.md).
 
 ## 📦 Data Preparation
 
@@ -174,7 +179,7 @@ Important notes:
 * Multi-channel audio is averaged to mono.
 * `min_wav_len` and `max_wav_len` are measured in raw waveform samples.
 
-The dataset yields:
+Before collation, the dataset yields:
 
 ```python
 {
@@ -210,7 +215,8 @@ Important configuration notes:
 * Each rank needs at least one shard with usable audio. Rank and worker partitions do not overlap within a pass.
 * Resuming skips `start_step` batches in deterministic epoch order; keep the shard list, worker count, and batching settings unchanged. This restores data order, not bitwise model RNG state.
 * Checkpoints are ranked by validation loss via `train_conf.avg_keep_nbest_models_type: loss`.
-* `tokenizer` and external `frontend` are null: the model consumes raw waveforms through its internal CNN.
+* `tokenizer` and external `frontend` are null: the collator converts raw audio to FBANK, and the model stacks frames internally.
+* `dataset_conf.feature_type: fbank` emits `speech: Tensor[B, T, 80]` with lengths in FBANK frames. Default FBANK uses waveform scale 1 and no per-utterance standardization, matching fairseq2 converter defaults.
 * `dataset_conf.batch_size` is measured in raw waveform samples, not seconds or fbank frames.
 * `dataset_conf.batch_type: frame` keeps `max_raw_samples_in_batch * num_utterances <= batch_size`.
 * `min_wav_len` and `max_wav_len` are also measured in raw waveform samples.
@@ -304,6 +310,10 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution details.
 ## Debugging and review
 
 See [REVIEW.md](REVIEW.md) for reproduced integration failures, fixes, and validation scope.
-The supplied configurations use a raw-waveform CNN; they do not implement the
-FBANK frontend of a pretrained w2v-BERT checkpoint. Successful execution does not
-establish checkpoint compatibility or pretraining convergence.
+The supplied configurations now follow the fairseq2 w2v-BERT 600m model defaults.
+See [FAIRSEQ2_ALIGNMENT.md](FAIRSEQ2_ALIGNMENT.md) for the pinned reference,
+algorithm changes, numerical checks and the upstream MLM interface correction.
+Use a fresh output directory: checkpoints from the previous CNN/SDConformer
+configuration are incompatible with this architecture. Optimizer and data recipe
+settings remain local choices; checkpoint conversion and pretraining convergence
+have not been established.

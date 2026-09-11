@@ -126,6 +126,7 @@ class W2VBertModel(Module):
 
         # 6. 返回 FunASR 期望的元组
         stats = dict(
+            num_targets=torch.tensor(w2v2_output.num_targets, device=loss.aggregate.device),
             bert_loss=loss.bert.detach(),
             w2v2_contrastive_loss=loss.w2v2.contrastive.detach(),
             w2v2_diversity_loss=loss.w2v2.diversity.detach(),
@@ -159,7 +160,7 @@ class W2VBertModel(Module):
         w2v2_diversity_weight: float = 0.1,
         w2v2_features_penalty_weight: float = 10.0,
     ) -> W2VBertLoss:
-        # --- BERT 损失计算 (使用 PyTorch 原生 CE) ---
+        # --- fairseq2 MLM loss: codebook entries are the class axis ---
         # 调整 logits 和 targets 的形状以匹配 F.cross_entropy
         bert_logits_permuted = output.bert_logits.permute(0, 2, 1)
         bert_logits_reshaped = bert_logits_permuted.reshape(
@@ -167,12 +168,14 @@ class W2VBertModel(Module):
         )
         bert_targets_reshaped = output.bert_targets.reshape(-1)
         
-        bert_loss = F.cross_entropy(
-            bert_logits_reshaped,
-            bert_targets_reshaped,
-            reduction="sum",
-            label_smoothing=bert_label_smoothing,
-        )
+        log_probs = F.log_softmax(bert_logits_reshaped, dim=-1, dtype=torch.float32)
+        bert_loss = F.nll_loss(log_probs, bert_targets_reshaped, reduction="sum")
+        if not 0.0 <= bert_label_smoothing <= 1.0:
+            raise ValueError("bert_label_smoothing must be between 0 and 1.")
+        if bert_label_smoothing > 0.0:
+            # fairseq distributes smoothing mass over the incorrect classes.
+            eps = bert_label_smoothing / (log_probs.size(-1) - 1)
+            bert_loss = (1.0 - bert_label_smoothing - eps) * bert_loss - eps * log_probs.sum()
         
         # --- wav2vec 2.0 损失计算 (调用子模块) ---
         w2v2_loss = self.w2v2_model.compute_loss(

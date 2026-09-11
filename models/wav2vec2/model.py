@@ -121,6 +121,7 @@ class Wav2Vec2Model(Module):
         )
         
         stats = {
+            "num_targets": torch.tensor(output.num_targets, device=loss.aggregate.device),
             "loss": loss.aggregate.detach(),
             "contrastive_loss": loss.contrastive.detach(),
             "diversity_loss": loss.diversity.detach(),
@@ -184,8 +185,8 @@ class Wav2Vec2Model(Module):
         if temporal_mask is None:
             raise RuntimeError("`temporal_mask` is `None`.")
 
-        if temporal_mask.sum() < 2:
-            raise ValueError("Pretraining needs at least two masked feature frames; use longer audio or more masking.")
+        if (temporal_mask.sum(-1) < 2).any():
+            raise ValueError("Pretraining needs at least two masked feature frames per utterance; use longer audio or more masking.")
         targets = Wav2Vec2Masker.extract_masked_elements(targets, temporal_mask)
 
         return Wav2Vec2Features(processed_seqs, features_padding_mask, targets, temporal_mask, raw_features)
@@ -203,20 +204,9 @@ class Wav2Vec2Model(Module):
 
         seqs = self.final_proj(seqs)
 
-        if targets.dim() == 2:
-            quantizer_input = targets.unsqueeze(0)
-        else:
-            quantizer_input = targets
-
-        quantizer_output = self.quantizer(quantizer_input)
-
+        quantizer_output = self.quantizer(targets)
         targets = self.final_target_proj(quantizer_output.quantized_vectors)
-
         distractors = self._sample_distractors(targets)
-
-        if targets.size(0) == 1 and seqs.dim() == 2:
-            targets = targets.squeeze(0)
-            distractors = distractors.squeeze(0)
 
         logits = self._compute_logits(seqs, targets, distractors)
 
@@ -236,6 +226,8 @@ class Wav2Vec2Model(Module):
     def _sample_distractors(self, targets: Tensor) -> Tensor:
         batch_size, seq_len, model_dim = targets.shape
         device = targets.device
+        if seq_len < 2:
+            raise ValueError("Need at least two masked frames per utterance for negative sampling.")
 
         targets_flat = targets.view(-1, model_dim)  # (N x S, M)
         indices = torch.arange(seq_len, device=device)  # (S)
@@ -265,31 +257,14 @@ class Wav2Vec2Model(Module):
     def _compute_logits(
         self, seqs: Tensor, targets: Tensor, distractors: Tensor
     ) -> Tensor:
-        # 修正前:
-        # seqs, targets = seqs.unsqueeze(2), targets.unsqueeze(2)
-        # candidates = torch.cat([targets, distractors], dim=2)
-        
-        # 修正后:
-        # seqs: (NumMasked, Dim) -> (NumMasked, 1, Dim)
-        # targets: (NumMasked, Dim) -> (NumMasked, 1, Dim)
-        # distractors: (NumMasked, NumDistractors, Dim)
-        # 目标是在第二个维度上拼接，所以需要将 targets 扩展一维
-        seqs, targets = seqs.unsqueeze(1), targets.unsqueeze(1)
-        
-        # candidates 形状: (NumMasked, 1 + NumDistractors, Dim)
-        candidates = torch.cat([targets, distractors], dim=1)
-        
+        # Keep (batch, masked_time, dim): negatives never cross utterance boundaries.
+        seqs, targets = seqs.unsqueeze(2), targets.unsqueeze(2)
+        candidates = torch.cat([targets, distractors], dim=2)
         logits = torch.cosine_similarity(seqs.float(), candidates.float(), dim=-1)
-
-        if self.logit_temp != 1.0:
-            logits = logits / self.logit_temp
-
-        distractor_is_target = (targets == distractors).all(-1)
-        if distractor_is_target.any():
-            
-            logits[:, 1:][distractor_is_target] = -torch.inf
-
-        return logits
+        logits = logits / self.logit_temp
+        same_target = (targets == distractors).all(-1)
+        negatives = logits[..., 1:].masked_fill(same_target, -torch.inf)
+        return torch.cat([logits[..., :1], negatives], dim=-1)
 
     def compute_loss(
         self,
@@ -315,7 +290,7 @@ class Wav2Vec2Model(Module):
 
     def compute_contrastive_loss(self, logits: Tensor) -> Tensor:
         num_masked = logits.numel() // logits.size(-1)
-        logits = logits.reshape(num_masked, logits.size(-1))
+        logits = logits.transpose(0, 1).reshape(num_masked, logits.size(-1))
         logits = logits.float()  # For numerical stability
 
         # 目标总是在索引 0

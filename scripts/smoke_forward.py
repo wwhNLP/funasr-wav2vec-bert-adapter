@@ -38,7 +38,7 @@ def small_config() -> dict:
             pos_encoder_conf=dict(model_dim=16, kernel_size=8, num_groups=2),
             layer_norm_features=True,
         ),
-        encoder="SDConformerEncoder",
+        encoder="Fairseq2ConformerEncoder",
         encoder_conf=dict(
             input_layer=None,
             input_size=16,
@@ -73,32 +73,51 @@ def small_config() -> dict:
         ),
     )
 
+def small_fbank_config(num_fbank_channels=80) -> dict:
+    cfg = small_config()
+    feature_dim = num_fbank_channels * 2
+    cfg["frontend_conf"] = dict(model_dim=16, feature_dim=feature_dim, use_fbank=True,
+        feature_extractor_conf=dict(num_fbank_channels=num_fbank_channels, stride=2),
+        pos_encoder_conf=None, layer_norm_features=False)
+    cfg["quantizer_conf"]["model_dim"] = feature_dim
+    return cfg
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--config", help="Optional full FunASR YAML model configuration")
+    parser.add_argument("--bf16", action="store_true")
     args = parser.parse_args()
     torch.manual_seed(0)
-    model = W2VBertModel(w2v2_config=small_config(), num_bert_encoder_layers=2).to(args.device)
-    model.train()
-
-    speech = torch.randn(2, 320, device=args.device)
-    lengths = torch.tensor([320, 300], dtype=torch.int32, device=args.device)
-    loss, stats, weight = model(speech, lengths)
+    torch.set_num_threads(4)
+    if args.config:
+        from omegaconf import OmegaConf
+        model_conf = OmegaConf.to_container(OmegaConf.load(args.config).model_conf, resolve=True)
+    else:
+        model_conf = dict(w2v2_config=small_fbank_config(), num_bert_encoder_layers=2)
+    model = W2VBertModel(**model_conf).to(args.device).train()
+    channels = model_conf["w2v2_config"]["frontend_conf"]["feature_extractor_conf"]["num_fbank_channels"]
+    speech = torch.randn(2, 300, channels, device=args.device)
+    lengths = torch.tensor([300, 280], dtype=torch.int32, device=args.device)
+    with torch.autocast(args.device, dtype=torch.bfloat16, enabled=args.bf16):
+        loss, stats, weight = model(speech, lengths)
     loss.backward()
-
     assert torch.isfinite(loss)
+    grad = model.w2v2_model.quantizer.entry_proj.weight.grad
+    assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0
     print("device:", next(model.parameters()).device)
+    print("parameters:", sum(p.numel() for p in model.parameters()))
     print("loss:", float(loss.detach()))
     print("weight:", int(weight))
-    print({key: float(value) for key, value in stats.items()})
-    print("quantizer_entry_proj_grad:", model.w2v2_model.quantizer.entry_proj.weight.grad is not None)
-
-    assert model.w2v2_model.quantizer.entry_proj.weight.grad is not None
+    print("quantizer_entry_proj_grad:", True)
     model.eval()
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast(args.device, dtype=torch.bfloat16, enabled=args.bf16):
         valid_loss, _, _ = model(speech, lengths)
     assert torch.isfinite(valid_loss)
     print("valid_loss:", float(valid_loss))
+    if args.device == "cuda":
+        print("peak_GiB:", torch.cuda.max_memory_allocated() / 1024**3)
 
 
 if __name__ == "__main__":

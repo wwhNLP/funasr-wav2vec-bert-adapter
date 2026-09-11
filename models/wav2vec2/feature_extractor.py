@@ -229,3 +229,27 @@ class Float32GroupNorm(nn.GroupNorm):
         fp32_b = b.float() if b is not None else None
         y = group_norm(fp32_x, self.num_groups, fp32_w, fp32_b, self.eps)
         return y.type_as(x)
+
+class Wav2Vec2FbankFeatureExtractor(Module):
+    """Stack adjacent FBANK frames as in fairseq2 (80 channels x stride 2)."""
+    def __init__(self, num_fbank_channels=80, stride=2, sample_every_k=1):
+        super().__init__()
+        if num_fbank_channels <= 0 or stride <= 0:
+            raise ValueError("FBANK channels and stride must be positive.")
+        if sample_every_k != 1:
+            raise ValueError("Only the fairseq2 w2v-BERT default sample_every_k=1 is supported.")
+        self.num_fbank_channels = num_fbank_channels
+        self.stride = stride
+        self.output_dim = num_fbank_channels * stride
+
+    def forward(self, seqs, lengths):
+        if seqs.ndim != 3 or seqs.size(-1) != self.num_fbank_channels:
+            raise ValueError(f"Expected FBANK input (batch, frames, {self.num_fbank_channels}).")
+        width = seqs.size(1) - seqs.size(1) % self.stride
+        lengths = lengths.to(device=seqs.device, dtype=torch.long).reshape(-1)
+        if lengths.numel() != seqs.size(0) or (lengths <= 0).any() or (lengths > seqs.size(1)).any():
+            raise ValueError("Invalid FBANK lengths.")
+        contracted = lengths.clamp(max=width) // self.stride
+        if (contracted == 0).any():
+            raise ValueError("Insufficient FBANK frames for stacking.")
+        return seqs[:, :width].reshape(seqs.size(0), width // self.stride, self.output_dim), contracted

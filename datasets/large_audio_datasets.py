@@ -794,6 +794,17 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         if not batch_of_samples:
             return None
 
+        if self.kwargs.get("feature_type", "waveform") == "fbank":
+            # Construct per process: native FBANK objects must not be pickled into workers.
+            if not hasattr(self, "_fbank_converter"):
+                from .fbank import WaveformToFbank
+                self._fbank_converter = WaveformToFbank(sample_rate=self.fs, **self.kwargs.get("fbank_conf", {}))
+            features = [self._fbank_converter(sample["speech"]) for sample in batch_of_samples]
+            return {
+                "speech": torch.nn.utils.rnn.pad_sequence(features, batch_first=True),
+                "speech_lengths": torch.tensor([len(x) for x in features], dtype=torch.int32),
+            }
+
         outputs = {}
         # Group samples by key
         for sample in batch_of_samples:

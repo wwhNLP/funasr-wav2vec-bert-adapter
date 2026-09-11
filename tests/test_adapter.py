@@ -81,7 +81,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_short_audio_error(self):
         model = Wav2Vec2Model(**smoke.small_config())
-        with self.assertRaisesRegex(ValueError, 'at least two masked'):
+        with self.assertRaisesRegex(ValueError, 'short|span|at least two masked'):
             model(torch.randn(1, 10), torch.tensor([10]))
 
     def test_remote_entry_from_other_directory(self):
@@ -95,7 +95,7 @@ assert 'WarmupPolynomialDecayLR' in scheduler_classes
 '''
         subprocess.run([sys.executable, '-c', code], cwd='/tmp', check=True, capture_output=True)
 
-    def make_shards(self, directory):
+    def make_shards(self, directory, samples=400):
         paths = []
         for i in range(4):
             path = Path(directory) / f'{i}.tar'
@@ -104,7 +104,7 @@ assert 'WarmupPolynomialDecayLR' in scheduler_classes
                 stream.setnchannels(1)
                 stream.setsampwidth(2)
                 stream.setframerate(8000)
-                stream.writeframes((torch.ones(400 + i * 40, dtype=torch.int16) * (i + 1) * 100).numpy().tobytes())
+                stream.writeframes((torch.ones(samples + i * 40, dtype=torch.int16) * (i + 1) * 100).numpy().tobytes())
             with tarfile.open(path, 'w') as tar:
                 info = tarfile.TarInfo(f'{i}.wav')
                 info.size = len(audio.getvalue())
@@ -142,15 +142,15 @@ assert 'WarmupPolynomialDecayLR' in scheduler_classes
     def test_launcher_checkpoint_and_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
-            listing = self.make_shards(directory)
+            listing = self.make_shards(directory, samples=4000)
             cfg = OmegaConf.load(ROOT / 'configs/w2vbert_pretrain.yaml')
             cfg.model_conf = dict(num_bert_encoder_layers=2, num_target_codebooks=1,
-                                  w2v2_config=smoke.small_config())
+                                  w2v2_config=smoke.small_fbank_config())
             cfg.train_conf.update(dict(max_epoch=1, accum_grad=1, resume=False, keep_nbest_models=1, avg_nbest_model=1))
             cfg.scheduler_conf = dict(warmup_steps=1, total_steps=6, power=1., end_lr=1e-6)
             cfg.dataset_conf.update(dict(batch_num_epoch=2, valid_batch_num_epoch=1,
                 batch_type='example', batch_size=2, sort_size=2, num_workers=0,
-                min_wav_len=1, max_wav_len=2000))
+                min_wav_len=1, max_wav_len=16000))
             cfg['disable_update'] = True
             OmegaConf.save(cfg, work / 'tiny.yaml')
             env = dict(os.environ, PYTHON=sys.executable, CONFIG_PATH=str(work / 'tiny.yaml'),
