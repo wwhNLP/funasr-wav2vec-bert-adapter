@@ -3,6 +3,7 @@
 # Copied and adapted from WeNet codebase
 # https://github.com/wenet-e2e/wenet/blob/main/wenet/dataset/datapipes.py
 import tarfile
+import logging
 import io
 import os
 import torchaudio
@@ -27,10 +28,12 @@ def read_tar_file(data):
     obj = {}
     try:
         with tarfile.open(path, "r:*") as tar:
-            for member in tar.getmembers():
+            for member in tar:
+                if not member.isfile():
+                    continue
                 key = member.name
                 key = key.replace('\\', '/')
-                key = os.path.splitext(key.split('/')[-1])[0]
+                key = os.path.splitext(key)[0]
                 if key not in obj:
                     obj[key] = {}
 
@@ -55,25 +58,25 @@ def read_tar_file(data):
         if 'wav' in value:
             sample = dict(key=key, wav=value['wav'])
             # Add a placeholder for 'txt' if it's missing, to avoid downstream errors.
-            if 'txt' not in value:
-                sample['txt'] = b'' # empty bytes
+            sample['txt'] = value.get('txt', b'')
             samples.append(sample)
 
     return samples
 
 class Shuffler:
     """A simple shuffler for iter datapipe."""
-    def __init__(self, shuffler_size=1000, shuffle=True):
+    def __init__(self, shuffler_size=1000, shuffle=True, rng=None):
         self.shuffler_size = shuffler_size
         self.shuffle = shuffle
         self.pool = []
+        self.rng = rng if rng is not None else random
 
     def add(self, x):
         """Add a sample to the pool."""
         self.pool.append(x)
         if len(self.pool) >= self.shuffler_size:
             if self.shuffle:
-                idx = random.randint(0, len(self.pool) - 1)
+                idx = self.rng.randint(0, len(self.pool) - 1)
                 return self.pool.pop(idx)
             else:
                 return self.pool.pop(0)
@@ -83,7 +86,7 @@ class Shuffler:
     def get_and_clear(self):
         """Get all samples from the pool and clear it."""
         if self.shuffle:
-            random.shuffle(self.pool)
+            self.rng.shuffle(self.pool)
         for x in self.pool:
             yield x
         self.pool = []
@@ -94,13 +97,14 @@ class TarFileAndGroupDataPipe(IterDataPipe):
     This DataPipe reads samples from tar files and applies streaming shuffling.
     The `read_tar_file` function is expected to group samples by key within a single tar file.
     """
-    def __init__(self, datapipe, shuffle=False, shuffler_size=1000):
+    def __init__(self, datapipe, shuffle=False, shuffler_size=1000, seed=None):
         self.datapipe = datapipe
         self.shuffle = shuffle
         self.shuffler_size = shuffler_size
+        self.seed = seed
 
     def __iter__(self):
-        shuffler = Shuffler(self.shuffler_size, self.shuffle)
+        shuffler = Shuffler(self.shuffler_size, self.shuffle, random.Random(self.seed))
         for data in self.datapipe:
             # 读取一个tar的样本数据
             samples = read_tar_file(data)
@@ -699,6 +703,10 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         self.frontend = frontend
         self.is_training = is_training
         self.kwargs = kwargs
+        self.epoch = 0
+        dist = torch.distributed
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
         # --- START OF FIX B ---
         self.batch_num_epoch = self.kwargs.get("batch_num_epoch")
@@ -709,6 +717,8 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
                 "in the dataset configuration."
             )
         self.batch_num_epoch = int(self.batch_num_epoch)
+        if self.batch_num_epoch <= 0:
+            raise ValueError("batch_num_epoch must be positive.")
         # --- END OF FIX B ---
 
         self.preprocessor_speech = None
@@ -727,7 +737,7 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         self.max_wav_len = kwargs.get("max_wav_len", float('inf'))
 
         with open(path, 'r', encoding='utf8') as fin:
-            self.shard_list = [line.strip() for line in fin]
+            self.shard_list = [line.strip() for line in fin if line.strip()]
 
     def __len__(self):
         """
@@ -745,10 +755,21 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         
         wav_file = io.BytesIO(wav_bytes)
         try:
-            data_src, fs = torchaudio.load(wav_file)
+            try:
+                data_src, fs = torchaudio.load(wav_file)
+            except (ImportError, RuntimeError):
+                # Recent torchaudio versions require the optional TorchCodec backend.
+                import soundfile
+                wav_file.seek(0)
+                audio, fs = soundfile.read(wav_file, dtype="float32", always_2d=True)
+                data_src = torch.from_numpy(audio.T.copy())
         except Exception as e:
+            logging.warning("Skipping undecodable audio %s: %s", key, e)
             return None
 
+        if fs != self.fs:
+            data_src = torchaudio.functional.resample(data_src, fs, self.fs)
+            fs = self.fs
         if data_src.numel() == 0 or data_src.shape[1] < self.min_wav_len:
             return None
 
@@ -829,14 +850,24 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         if batch:
             yield batch
 
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
     def __iter__(self):
-        datapipe = torch.utils.data.datapipes.iter.IterableWrapper(self.shard_list)
-        datapipe = datapipe.sharding_filter()
+        # This is an IterableDataset, so DataLoader cannot shard its internal DataPipe.
+        shards = list(self.shard_list)
         if self.is_training:
-            datapipe = datapipe.shuffle()
+            random.Random(self.kwargs.get("seed", 0) + self.epoch).shuffle(shards)
+        worker = torch.utils.data.get_worker_info()
+        worker_id, num_workers = (worker.id, worker.num_workers) if worker else (0, 1)
+        shards = shards[self.rank::self.world_size][worker_id::num_workers]
+        datapipe = torch.utils.data.datapipes.iter.IterableWrapper(shards)
         datapipe = datapipe.map(lambda x: dict(path=x))
         shuffler_size = self.kwargs.get("shuffler_size", 2000)
-        datapipe = datapipe.tar_file_and_group(shuffle=self.is_training, shuffler_size=shuffler_size)
+        datapipe = datapipe.tar_file_and_group(
+            shuffle=self.is_training, shuffler_size=shuffler_size,
+            seed=self.kwargs.get("seed", 0) + self.epoch * 1000003 + self.rank * num_workers + worker_id,
+        )
         datapipe = datapipe.map(self._process_sample)
         datapipe = datapipe.filter(lambda x: x is not None)
         

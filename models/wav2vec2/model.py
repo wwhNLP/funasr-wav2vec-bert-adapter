@@ -100,7 +100,7 @@ class Wav2Vec2Model(Module):
         speech: Tensor,
         speech_lengths: Tensor,
         **kwargs,
-    ) -> dict:
+    ) -> tuple[Tensor, dict, Tensor]:
         """
         FunASR 标准 forward 接口
         """
@@ -120,17 +120,14 @@ class Wav2Vec2Model(Module):
             features_penalty_weight=features_penalty_weight,
         )
         
-        # FunASR 需要一个字典
-        return {
-            "loss": loss.aggregate,
-            "output": output,
-            "all_hidden_states": all_hidden_states,
-            "stats": {
-                "contrastive_loss": loss.contrastive,
-                "diversity_loss": loss.diversity,
-                "features_penalty": loss.features_penalty,
-            }
+        stats = {
+            "loss": loss.aggregate.detach(),
+            "contrastive_loss": loss.contrastive.detach(),
+            "diversity_loss": loss.diversity.detach(),
+            "features_penalty": loss.features_penalty.detach(),
         }
+        weight = torch.tensor(speech.size(0), device=loss.aggregate.device)
+        return loss.aggregate, stats, weight
 
     if TYPE_CHECKING:
         __call__ = forward
@@ -187,6 +184,8 @@ class Wav2Vec2Model(Module):
         if temporal_mask is None:
             raise RuntimeError("`temporal_mask` is `None`.")
 
+        if temporal_mask.sum() < 2:
+            raise ValueError("Pretraining needs at least two masked feature frames; use longer audio or more masking.")
         targets = Wav2Vec2Masker.extract_masked_elements(targets, temporal_mask)
 
         return Wav2Vec2Features(processed_seqs, features_padding_mask, targets, temporal_mask, raw_features)

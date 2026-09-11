@@ -3,3 +3,4 @@
 from . import encoder  # noqa: F401
 from . import models  # noqa: F401
 from . import datasets  # noqa: F401
+from . import schedulers  # noqa: F401

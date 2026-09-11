@@ -27,3 +27,5 @@ wandb/
 *.tar
 *.mvn
 *.model
+
+.codegraph/

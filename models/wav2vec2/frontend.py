@@ -20,9 +20,9 @@ from torch import Tensor
 from torch.nn import Dropout, Module
 
 # 【假设】你本地的这些文件也已经被重写为 FunASR 兼容版
-from models.wav2vec2.feature_extractor import Wav2Vec2FeatureExtractor # 已转换
-from models.wav2vec2.position_encoder import Wav2Vec2PositionEncoder # 已转换
-from models.wav2vec2.masker import Wav2Vec2Masker # 已转换
+from .feature_extractor import Wav2Vec2FeatureExtractor # 已转换
+from .position_encoder import Wav2Vec2PositionEncoder # 已转换
+from .masker import Wav2Vec2Masker # 已转换
 
 # 【假设】你已经在一个 utils.py 文件中定义了这个
 class NotSupportedError(Exception):

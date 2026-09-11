@@ -68,31 +68,29 @@ class Wav2Vec2Masker(Module):
         """
         batch_size, seq_len, model_dim = seqs.shape
 
-        if self.training:
-            if self.max_temporal_mask_prob > 0.0:
-                temporal_mask = self._compute_temporal_mask(
-                    (batch_size, seq_len), padding_mask, device=seqs.device
-                )
-            else:
-                temporal_mask = None
-
-            if self.max_spatial_mask_prob > 0.0:
-                spatial_mask = self._compute_spatial_mask(
-                    (batch_size, model_dim), device=seqs.device
-                )
-
-                if spatial_mask is not None:
-                    seqs = seqs.masked_fill(
-                        spatial_mask.unsqueeze(1).expand_as(seqs), 0.0
-                    )
-            else:
-                spatial_mask = None
+        # Masking is part of the pretraining objective, including validation.
+        if self.max_temporal_mask_prob > 0.0:
+            temporal_mask = self._compute_temporal_mask(
+                (batch_size, seq_len), padding_mask, device=seqs.device
+            )
         else:
-            temporal_mask, spatial_mask = None, None
+            temporal_mask = None
+
+        if self.max_spatial_mask_prob > 0.0:
+            spatial_mask = self._compute_spatial_mask(
+                (batch_size, model_dim), device=seqs.device
+            )
+
+            if spatial_mask is not None:
+                seqs = seqs.masked_fill(
+                    spatial_mask.unsqueeze(1).expand_as(seqs), 0.0
+                )
+        else:
+            spatial_mask = None
 
         # If `temporal_mask` is not None, it means we have to apply masking.
         if temporal_mask is not None:
-            seqs[temporal_mask] = self.mask_emb
+            seqs = torch.where(temporal_mask.unsqueeze(-1), self.mask_emb.to(seqs.dtype), seqs)
 
         return seqs, temporal_mask
 

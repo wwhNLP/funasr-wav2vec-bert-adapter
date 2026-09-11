@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import argparse
 import os
 from pathlib import Path
 
@@ -18,8 +19,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from models.w2vbert.model import W2VBertModel  # noqa: E402
 
 
-def main() -> None:
-    cfg = dict(
+def small_config() -> dict:
+    return dict(
         model_dim=16,
         final_dim=8,
         final_proj_bias=True,
@@ -72,18 +73,32 @@ def main() -> None:
         ),
     )
 
-    model = W2VBertModel(w2v2_config=cfg, num_bert_encoder_layers=2)
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    args = parser.parse_args()
+    torch.manual_seed(0)
+    model = W2VBertModel(w2v2_config=small_config(), num_bert_encoder_layers=2).to(args.device)
     model.train()
 
-    speech = torch.randn(2, 320)
-    lengths = torch.tensor([320, 300], dtype=torch.int32)
+    speech = torch.randn(2, 320, device=args.device)
+    lengths = torch.tensor([320, 300], dtype=torch.int32, device=args.device)
     loss, stats, weight = model(speech, lengths)
     loss.backward()
 
+    assert torch.isfinite(loss)
+    print("device:", next(model.parameters()).device)
     print("loss:", float(loss.detach()))
     print("weight:", int(weight))
     print({key: float(value) for key, value in stats.items()})
     print("quantizer_entry_proj_grad:", model.w2v2_model.quantizer.entry_proj.weight.grad is not None)
+
+    assert model.w2v2_model.quantizer.entry_proj.weight.grad is not None
+    model.eval()
+    with torch.no_grad():
+        valid_loss, _, _ = model(speech, lengths)
+    assert torch.isfinite(valid_loss)
+    print("valid_loss:", float(valid_loss))
 
 
 if __name__ == "__main__":

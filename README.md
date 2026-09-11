@@ -26,13 +26,18 @@ This repository is a **FunASR custom pretraining adapter**, not a standalone ASR
 
 It allows FunASR to load custom wav2vec2 / w2v-BERT-style model, encoder, dataset, and dataloader modules at runtime.
 
-In a typical training command, the adapter is passed to FunASR as:
+For FunASR remote-code loading, point to the registration file:
 
 ```bash
 ++model="${MODEL_DIR}"
 ++trust_remote_code=true
-++remote_code="${MODEL_DIR}"
-````
+++remote_code="${MODEL_DIR}/register.py"
+```
+
+The training launcher uses `scripts/train.py` to register components before FunASR
+reads `model_conf`. Keep the YAML model class name (`W2VBertModel`) when using
+this entry point; overriding it with a directory bypasses normal construction in
+FunASR versions that skip remote-code loading when `model_conf` is present.
 
 After registration, FunASR can instantiate components such as:
 
@@ -65,6 +70,8 @@ features -> entry_proj -> hard gumbel_softmax -> codebook entries -> quantized t
 
 ```text
 .
+├── register.py                    # FunASR file-based remote-code entry
+├── schedulers.py                  # WarmupPolynomialDecayLR registration
 ├── __init__.py                     
 ├── configuration.json              
 ├── configs/
@@ -115,7 +122,8 @@ export MODEL_DIR=/path/to/funasr-wav2vec-bert-adapter
 Run the smoke test:
 
 ```bash
-FUNASR_ROOT=/path/to/FunASR python scripts/smoke_forward.py
+CUDA_VISIBLE_DEVICES=4 python scripts/smoke_forward.py --device cuda
+CUDA_VISIBLE_DEVICES=4 python -m unittest discover -s tests -v
 ```
 
 Expected output:
@@ -126,9 +134,13 @@ weight: 2
 quantizer_entry_proj_grad: True
 ```
 
-The smoke test verifies local imports, model construction, forward/backward execution, and quantizer gradients.
+The smoke test verifies forward/backward execution, quantizer gradients, and validation.
+The regression suite also covers FP32/BF16, tar sharding and resampling, remote registration,
+and CUDA training/checkpoint resume through the actual launcher. CPU runs skip the launcher test.
 
-For multi-GPU training, DeepSpeed is required. You can quickly check your environment with:
+The launcher uses FunASR DDP by default for multiple GPUs. To enable DeepSpeed, install it
+and pass `++train_conf.use_deepspeed=true`; ensure its gradient accumulation setting matches
+`train_conf.accum_grad`. You can check your environment with:
 
 ```bash
 python -c "import torch; print(torch.__version__)"
@@ -157,9 +169,8 @@ No transcript is required. Optional `.txt` files may exist in the tar shard, but
 
 Important notes:
 
-* Audio is loaded with `torchaudio.load`.
-* The dataset does not currently resample audio.
-* Prepare audio at the sample rate expected by the model config, usually 16 kHz.
+* Audio is loaded with `torchaudio.load`, with a SoundFile fallback when the optional decoder is unavailable. Supported formats depend on the installed decoding backend.
+* Audio is resampled to 16 kHz before length filtering.
 * Multi-channel audio is averaged to mono.
 * `min_wav_len` and `max_wav_len` are measured in raw waveform samples.
 
@@ -194,7 +205,12 @@ Key config fields:
 
 Important configuration notes:
 
-* `batch_num_epoch` is required because the tar-shard dataset is iterable.
+* `batch_num_epoch` is the exact number of training batches **per rank**. Shards repeat if exhausted, and longer streams are truncated at the step budget.
+* `valid_batch_num_epoch` sets the validation budget (defaults to the training budget if omitted; supplied configs use 100).
+* Each rank needs at least one shard with usable audio. Rank and worker partitions do not overlap within a pass.
+* Resuming skips `start_step` batches in deterministic epoch order; keep the shard list, worker count, and batching settings unchanged. This restores data order, not bitwise model RNG state.
+* Checkpoints are ranked by validation loss via `train_conf.avg_keep_nbest_models_type: loss`.
+* `tokenizer` and external `frontend` are null: the model consumes raw waveforms through its internal CNN.
 * `dataset_conf.batch_size` is measured in raw waveform samples, not seconds or fbank frames.
 * `dataset_conf.batch_type: frame` keeps `max_raw_samples_in_batch * num_utterances <= batch_size`.
 * `min_wav_len` and `max_wav_len` are also measured in raw waveform samples.
@@ -221,7 +237,7 @@ Override config values if needed:
 ```bash
 bash ${MODEL_DIR}/scripts/train_pretrain.sh \
   ++train_conf.max_epoch=3 \
-  ++dataset_conf.batch_size=800000 \
+  ++dataset_conf.batch_size=1000000 \
   ++dataset_conf.batch_num_epoch=20000 \
   ++train_conf.accum_grad=8 \
   ++optim_conf.lr=4e-5
@@ -284,3 +300,10 @@ This project is released under the [MIT License](LICENSE) for the original code 
 Parts of the implementation are adapted from or inspired by FunASR and fairseq2 wav2vec2 / w2v-BERT components. Please keep original copyright headers in copied or modified source files.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution details.
+
+## Debugging and review
+
+See [REVIEW.md](REVIEW.md) for reproduced integration failures, fixes, and validation scope.
+The supplied configurations use a raw-waveform CNN; they do not implement the
+FBANK frontend of a pretrained w2v-BERT checkpoint. Successful execution does not
+establish checkpoint compatibility or pretraining convergence.

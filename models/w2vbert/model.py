@@ -15,7 +15,7 @@ from typing_extensions import override
 from funasr.register import tables
 
 # 导入你本地重构好的、FunASR兼容的wav2vec2组件
-from models.wav2vec2 import (
+from ..wav2vec2 import (
     Wav2Vec2Loss,
     Wav2Vec2Masker,
     Wav2Vec2Model,
@@ -59,6 +59,11 @@ class W2VBertModel(Module):
         self.model_dim = self.w2v2_model.model_dim
         self.num_bert_encoder_layers = num_bert_encoder_layers
         self.num_target_codebooks = num_target_codebooks
+
+        if not 0 < num_bert_encoder_layers < len(self.w2v2_model.encoder.encoders):
+            raise ValueError("num_bert_encoder_layers must leave at least one contrastive encoder layer.")
+        if not 1 <= num_target_codebooks <= self.w2v2_model.quantizer.num_codebooks:
+            raise ValueError("num_target_codebooks exceeds the quantizer's codebooks.")
 
         # 3. 使用 PyTorch 原生的 Linear 作为 BERT 投影层
         self.final_bert_proj = nn.Linear(
@@ -129,14 +134,8 @@ class W2VBertModel(Module):
         )
         weight = torch.tensor(speech.size(0), device=loss.aggregate.device)
 
-        # NaN loss detection
-        if torch.isnan(loss.aggregate):
-            import torch.distributed as dist
-            print(f"!!!!!!!!!!!!! NaN loss detected on rank {dist.get_rank()} !!!!!!!!!!!!!")
-            print(f"bert_loss: {loss.bert.item()}")
-            print(f"w2v2_contrastive_loss: {loss.w2v2.contrastive.item()}")
-            print(f"w2v2_diversity_loss: {loss.w2v2.diversity.item()}")
-            raise RuntimeError(f"NaN loss detected on rank {dist.get_rank()}. Stopping training.")
+        if not torch.isfinite(loss.aggregate):
+            raise RuntimeError("Non-finite w2v-BERT pretraining loss.")
 
         return loss.aggregate, stats, weight
 

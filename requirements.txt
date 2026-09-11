@@ -4,3 +4,4 @@ funasr
 hydra-core
 omegaconf
 sentencepiece
+soundfile

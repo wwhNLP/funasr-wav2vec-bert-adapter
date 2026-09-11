@@ -137,74 +137,72 @@ class DataloaderMapStyle:
         return dataloader_tr, dataloader_val
 
 
+class EpochDataLoader:
+    """Give streaming ranks equal step counts and skip consumed batches on resume."""
+
+    def __init__(self, loader, steps, start_step=0):
+        self.loader = loader
+        self.batch_sampler = self
+        self.steps = int(steps)
+        self.start_step = int(start_step)
+        if self.steps <= 0 or not 0 <= self.start_step <= self.steps:
+            raise ValueError("Invalid streaming epoch steps or resume offset.")
+
+    def set_epoch(self, epoch):
+        dataset = self.loader.dataset
+        if getattr(dataset, "is_training", False) and hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(epoch)
+
+    def __len__(self):
+        return self.steps - self.start_step
+
+    def __iter__(self):
+        iterator = iter(self.loader)
+        for step in range(self.steps):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                iterator = iter(self.loader)
+                try:
+                    batch = next(iterator)
+                except StopIteration as exc:
+                    raise RuntimeError("No usable audio batches on this rank; check shards and length filters.") from exc
+            if step >= self.start_step:
+                yield batch
+
+
 @tables.register("dataloader_classes", "DataloaderIterable")
 class DataloaderIterable:
     def __init__(self, frontend=None, tokenizer=None, **kwargs):
-        logging.info("Build dataloader")
         self.kwargs = kwargs
         self.frontend = frontend
         self.tokenizer = tokenizer
-        self.data_split_num = 1 # iter style does not support split
-
+        self.data_split_num = 1
         self.train_data_set_list = kwargs.get("train_data_set_list")
-        dataset_conf = kwargs.get("dataset_conf", {})
-        estimated_total_samples = dataset_conf.get("estimated_total_samples")
-        estimated_samples_per_shard = dataset_conf.get("estimated_samples_per_shard")
-
-        try:
-            with open(self.train_data_set_list, 'r', encoding="utf-8") as f:
-                num_shards = len(f.readlines())
-        except Exception as e:
-            logging.warning(f"Failed to count samples in {self.train_data_set_list}: {e}")
-            num_shards = 0
-
-        if estimated_total_samples is not None:
-            self.num_samples = int(estimated_total_samples)
-        elif estimated_samples_per_shard is not None and num_shards > 0:
-            self.num_samples = int(num_shards * estimated_samples_per_shard)
-        else:
-            self.num_samples = num_shards # fallback to shard count for streaming data
+        conf = kwargs.get("dataset_conf", {})
+        with open(self.train_data_set_list, encoding="utf-8") as stream:
+            num_shards = sum(bool(line.strip()) for line in stream)
+        self.num_samples = int(conf.get("estimated_total_samples", num_shards * conf.get("estimated_samples_per_shard", 1)))
 
     def build_iter(self, epoch=0, data_split_i=0, start_step=0, **kwargs):
-        dataset_class = tables.dataset_classes.get(self.kwargs.get("dataset", "LargeAudioDataset"))
-        
-        dataset_tr = dataset_class(
-            self.train_data_set_list,
-            frontend=self.frontend,
-            tokenizer=self.tokenizer,
-            is_training=True,
-            **self.kwargs.get("dataset_conf"),
-        )
-
-        dataset_val = dataset_class(
-            self.kwargs.get("valid_data_set_list"),
-            frontend=self.frontend,
-            tokenizer=self.tokenizer,
-            is_training=False,
-            **self.kwargs.get("dataset_conf"),
-        )
-        
-        num_workers = self.kwargs.get("dataset_conf", {}).get("num_workers", 1)
-        prefetch_factor = self.kwargs.get("dataset_conf", {}).get("prefetch_factor", 2)
-        persistent_workers = self.kwargs.get("dataset_conf", {}).get("persistent_workers", True)
-        pin_memory = self.kwargs.get("dataset_conf", {}).get("pin_memory", True)
-        
-        dataloader_tr = torch.utils.data.DataLoader(
-            dataset_tr,
-            batch_size=None,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            prefetch_factor=prefetch_factor if num_workers > 0 else None,
-            persistent_workers=persistent_workers if num_workers > 0 else False,
-        )
-
-        dataloader_val = torch.utils.data.DataLoader(
-            dataset_val,
-            batch_size=None,
-            num_workers=self.kwargs.get("dataset_conf", {}).get("num_workers", 0),
-            pin_memory=self.kwargs.get("dataset_conf", {}).get("pin_memory", False),
-            prefetch_factor=prefetch_factor if num_workers > 0 else None,
-            persistent_workers=persistent_workers if num_workers > 0 else False,
-        )
-
-        return dataloader_tr, dataloader_val
+        dataset_class = tables.dataset_classes[self.kwargs["dataset"]]
+        conf = dict(self.kwargs.get("dataset_conf", {}))
+        num_workers = conf.get("num_workers", 0)
+        loaders = []
+        for training, path in [(True, self.train_data_set_list), (False, self.kwargs["valid_data_set_list"])]:
+            dataset = dataset_class(path, frontend=self.frontend, tokenizer=self.tokenizer,
+                                    is_training=training, **conf)
+            if hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(epoch if training else 0)
+            if hasattr(dataset, "shard_list") and len(dataset.shard_list) < getattr(dataset, "world_size", 1):
+                raise ValueError("Provide at least one tar shard per distributed rank.")
+            loader = torch.utils.data.DataLoader(
+                dataset, batch_size=None, num_workers=num_workers,
+                pin_memory=conf.get("pin_memory", True),
+                prefetch_factor=conf.get("prefetch_factor", 2) if num_workers else None,
+                persistent_workers=conf.get("persistent_workers", True) if num_workers else False,
+                generator=torch.Generator().manual_seed(conf.get("seed", 0) + (epoch if training else 0)),
+            )
+            steps = conf["batch_num_epoch"] if training else conf.get("valid_batch_num_epoch", conf["batch_num_epoch"])
+            loaders.append(EpochDataLoader(loader, steps, start_step if training else 0))
+        return tuple(loaders)

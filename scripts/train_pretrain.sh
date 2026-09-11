@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Path to an installed or cloned FunASR repository.
-FUNASR_ROOT="${FUNASR_ROOT:-/path/to/FunASR}"
+FUNASR_ROOT="${FUNASR_ROOT:-}"
 
 # Path to this repository. Override when launching from another directory.
 MODEL_DIR="${MODEL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -29,16 +29,18 @@ DISTRIBUTED_ARGS=(
   --master_port "${MASTER_PORT:-26670}"
 )
 
-TRAIN_TOOL="${FUNASR_ROOT}/funasr/bin/train_ds.py"
+if [[ -n "${FUNASR_ROOT}" ]]; then
+  export PYTHONPATH="${FUNASR_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
+TRAIN_TOOL="${MODEL_DIR}/scripts/train.py"
 
-torchrun "${DISTRIBUTED_ARGS[@]}" \
+"${PYTHON:-python}" -m torch.distributed.run "${DISTRIBUTED_ARGS[@]}" \
   "${TRAIN_TOOL}" \
   --config-path "$(dirname "${CONFIG_PATH}")" \
   --config-name "$(basename "${CONFIG_PATH}" .yaml)" \
-  ++model="${MODEL_DIR}" \
   hydra.run.dir="${OUTPUT_DIR}/hydra_log" \
   ++trust_remote_code=true \
-  ++remote_code="./" \
+  ++remote_code="${MODEL_DIR}/register.py" \
   ++train_data_set_list="${TRAIN_LIST}" \
   ++valid_data_set_list="${VALID_LIST}" \
   ++dataset_conf.data_split_num=1 \

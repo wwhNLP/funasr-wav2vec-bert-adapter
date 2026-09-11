@@ -249,7 +249,7 @@ class SDConformerEncoder(nn.Module):
         conf: dict = {},
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         
-        masks = (~make_pad_mask(ilens)[:, None, :]).to(xs_pad.device)
+        masks = (~make_pad_mask(ilens, maxlen=xs_pad.size(1))[:, None, :]).to(xs_pad.device)
         xs_pad, masks = self.embed(xs_pad, masks)
         
         xs_pad, pos_emb = self.pos_enc(xs_pad)
