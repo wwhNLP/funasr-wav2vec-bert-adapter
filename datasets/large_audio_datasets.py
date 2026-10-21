@@ -63,6 +63,34 @@ def read_tar_file(data):
 
     return samples
 
+
+def iter_tar_audio(data):
+    """Yield independent audio members without retaining an entire shard."""
+    path = data['path']
+    try:
+        with tarfile.open(path, "r|*") as tar:
+            while True:
+                member = tar.next()
+                # Python versions before 3.13 also cache TarInfo in stream mode.
+                # We only access the current member, so no index is needed.
+                tar.members.clear()
+                if member is None:
+                    break
+                if not member.isfile():
+                    continue
+                key, extension = os.path.splitext(member.name.replace('\\', '/'))
+                if extension[1:].lower() not in AUDIO_FORMAT_SETS:
+                    continue
+                fp = tar.extractfile(member)
+                if fp is None:
+                    continue
+                with fp:
+                    content = fp.read()
+                yield dict(key=key, wav=content, txt=b'')
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        logging.warning("Skipping unreadable tar shard %s: %s", path, exc)
+
+
 class Shuffler:
     """A simple shuffler for iter datapipe."""
     def __init__(self, shuffler_size=1000, shuffle=True, rng=None):
@@ -95,20 +123,21 @@ class Shuffler:
 class TarFileAndGroupDataPipe(IterDataPipe):
     """
     This DataPipe reads samples from tar files and applies streaming shuffling.
-    The `read_tar_file` function is expected to group samples by key within a single tar file.
+    Audio-only mode streams independent members. Grouped mode preserves pairing
+    of transcripts and audio even when their members are not adjacent.
     """
-    def __init__(self, datapipe, shuffle=False, shuffler_size=1000, seed=None):
+    def __init__(self, datapipe, shuffle=False, shuffler_size=1000, seed=None, audio_only=False):
         self.datapipe = datapipe
         self.shuffle = shuffle
         self.shuffler_size = shuffler_size
         self.seed = seed
+        self.audio_only = audio_only
 
     def __iter__(self):
         shuffler = Shuffler(self.shuffler_size, self.shuffle, random.Random(self.seed))
+        reader = iter_tar_audio if self.audio_only else read_tar_file
         for data in self.datapipe:
-            # 读取一个tar的样本数据
-            samples = read_tar_file(data)
-            for sample in samples:
+            for sample in reader(data):
                 # 添加到shuffler中
                 shuffled_sample = shuffler.add(sample)
                 if shuffled_sample is not None:
@@ -878,6 +907,7 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         datapipe = datapipe.tar_file_and_group(
             shuffle=self.is_training, shuffler_size=shuffler_size,
             seed=self.kwargs.get("seed", 0) + self.epoch * 1000003 + self.rank * num_workers + worker_id,
+            audio_only=True,
         )
         datapipe = datapipe.map(self._process_sample)
         datapipe = datapipe.filter(lambda x: x is not None)

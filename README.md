@@ -172,6 +172,9 @@ wav, flac, mp3, m4a, ogg, opus, wma
 
 No transcript is required. Optional `.txt` files may exist in the tar shard, but `SelfSupervisedLargeAudioDataset` ignores text and only uses audio.
 
+The self-supervised path streams audio members directly into its bounded shuffle
+buffer, without retaining the entire shard. Text and unrelated members are skipped.
+
 Important notes:
 
 * Audio is loaded with `torchaudio.load`, with a SoundFile fallback when the optional decoder is unavailable. Supported formats depend on the installed decoding backend.
