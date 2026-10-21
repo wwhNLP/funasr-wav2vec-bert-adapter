@@ -16,6 +16,24 @@ from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 
 AUDIO_FORMAT_SETS = set(['flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'wma'])
 
+
+def _load_mono_audio(wav_file, sample_rate):
+    """Decode and normalize audio before applying target-rate length limits."""
+    try:
+        waveform, source_rate = torchaudio.load(wav_file)
+    except (ImportError, RuntimeError):
+        # Recent torchaudio releases require the optional TorchCodec backend.
+        import soundfile
+        wav_file.seek(0)
+        audio, source_rate = soundfile.read(wav_file, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(audio.T.copy())
+    if source_rate != sample_rate:
+        waveform = torchaudio.functional.resample(waveform, source_rate, sample_rate)
+    if waveform.dim() > 1 and waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return waveform
+
+
 def read_tar_file(data):
     """Read a tar file and yield samples.
     Args:
@@ -258,7 +276,8 @@ class LargeAudioDataset(IterableDataset):
         target = sample['txt']
 
         wav_file = io.BytesIO(wav_bytes)
-        data_src, fs = torchaudio.load(wav_file)
+        data_src = _load_mono_audio(wav_file, self.fs)
+        fs = self.fs
         
         if data_src.shape[1] < self.min_wav_len or data_src.shape[1] > self.max_wav_len:
             return None
@@ -784,32 +803,19 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         
         wav_file = io.BytesIO(wav_bytes)
         try:
-            try:
-                data_src, fs = torchaudio.load(wav_file)
-            except (ImportError, RuntimeError):
-                # Recent torchaudio versions require the optional TorchCodec backend.
-                import soundfile
-                wav_file.seek(0)
-                audio, fs = soundfile.read(wav_file, dtype="float32", always_2d=True)
-                data_src = torch.from_numpy(audio.T.copy())
+            data_src = _load_mono_audio(wav_file, self.fs)
         except Exception as e:
             logging.warning("Skipping undecodable audio %s: %s", key, e)
             return None
 
-        if fs != self.fs:
-            data_src = torchaudio.functional.resample(data_src, fs, self.fs)
-            fs = self.fs
         if data_src.numel() == 0 or data_src.shape[1] < self.min_wav_len:
             return None
-
-        if data_src.dim() > 1 and data_src.shape[0] > 1:
-            data_src = torch.mean(data_src, dim=0, keepdim=True)
 
         if data_src.shape[1] > self.max_wav_len:
             return None
 
         if self.preprocessor_speech:
-            data_src = self.preprocessor_speech(data_src, fs=fs)
+            data_src = self.preprocessor_speech(data_src, fs=self.fs)
 
         return {
             "speech": data_src.squeeze(0),
@@ -983,11 +989,8 @@ class SelfSupervisedLargeAudioDatasetWithAugmentation(SelfSupervisedLargeAudioDa
         wav_bytes = sample['wav']
         
         wav_file = io.BytesIO(wav_bytes)
-        data_src, fs = torchaudio.load(wav_file)
-
-        # Ensure audio is mono
-        if data_src.dim() > 1 and data_src.shape[0] > 1:
-            data_src = torch.mean(data_src, dim=0, keepdim=True)
+        data_src = _load_mono_audio(wav_file, self.fs)
+        fs = self.fs
 
         if data_src.shape[1] < self.min_wav_len or data_src.shape[1] > self.max_wav_len:
             return None
