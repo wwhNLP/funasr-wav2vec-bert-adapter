@@ -175,6 +175,13 @@ No transcript is required. Optional `.txt` files may exist in the tar shard, but
 The self-supervised path streams audio members directly into its bounded shuffle
 buffer, without retaining the entire shard. Text and unrelated members are skipped.
 
+For `SelfSupervisedLargeAudioDatasetWithAugmentation` with `feature_type: fbank`,
+augmentation runs on waveforms before collation. The batch preserves `speech`,
+`speech_aug1`, and `speech_aug2` as separately padded FBANK tensors, with frame
+lengths in `speech_lengths`, `speech_lengths_aug1`, and `speech_lengths_aug2`.
+Batch budgets still use raw audio samples. The supplied pretraining models consume
+the main `speech` view; custom objectives can use the additional augmented views.
+
 Important notes:
 
 * Audio is loaded with `torchaudio.load`, with a SoundFile fallback when the optional decoder is unavailable. Supported formats depend on the installed decoding backend.

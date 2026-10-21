@@ -834,11 +834,18 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
             if not hasattr(self, "_fbank_converter"):
                 from .fbank import WaveformToFbank
                 self._fbank_converter = WaveformToFbank(sample_rate=self.fs, **self.kwargs.get("fbank_conf", {}))
-            features = [self._fbank_converter(sample["speech"]) for sample in batch_of_samples]
-            return {
-                "speech": torch.nn.utils.rnn.pad_sequence(features, batch_first=True),
-                "speech_lengths": torch.tensor([len(x) for x in features], dtype=torch.int32),
-            }
+            outputs = {}
+            for speech_key, length_key in (
+                ("speech", "speech_lengths"),
+                ("speech_aug1", "speech_lengths_aug1"),
+                ("speech_aug2", "speech_lengths_aug2"),
+            ):
+                if speech_key not in batch_of_samples[0]:
+                    continue
+                features = [self._fbank_converter(sample[speech_key]) for sample in batch_of_samples]
+                outputs[speech_key] = torch.nn.utils.rnn.pad_sequence(features, batch_first=True)
+                outputs[length_key] = torch.tensor([len(x) for x in features], dtype=torch.int32)
+            return outputs
 
         outputs = {}
         # Group samples by key
@@ -973,14 +980,15 @@ class SelfSupervisedLargeAudioDatasetWithAugmentation(SelfSupervisedLargeAudioDa
         new_length = int(original_length * stretch_factor)
         
         if new_length > 0 and new_length != original_length:
-            speech_for_interp = speech.transpose(0, 1).unsqueeze(0)
+            waveform = speech.ndim == 1
+            speech_for_interp = speech[None, None, :] if waveform else speech.transpose(0, 1).unsqueeze(0)
             interpolated_speech = torch.nn.functional.interpolate(
                 speech_for_interp,
                 size=new_length,
                 mode='linear',
                 align_corners=False
             )
-            speech = interpolated_speech.squeeze(0).transpose(0, 1)
+            speech = interpolated_speech[0, 0] if waveform else interpolated_speech.squeeze(0).transpose(0, 1)
             speech_lengths = torch.tensor([new_length], dtype=torch.int32)
         
         return speech, speech_lengths
@@ -998,10 +1006,16 @@ class SelfSupervisedLargeAudioDatasetWithAugmentation(SelfSupervisedLargeAudioDa
         if self.preprocessor_speech:
             data_src = self.preprocessor_speech(data_src, fs=fs)
 
-        speech, speech_lengths = extract_fbank(
-            data_src, data_type=self.data_type, frontend=self.frontend, is_final=True
-        )
-        speech = speech[0, :, :]
+        if self.kwargs.get("feature_type", "waveform") == "fbank":
+            # Keep raw samples for length-based batching. The collator converts
+            # every augmented view once, after waveform augmentation.
+            speech = data_src.squeeze(0)
+            speech_lengths = speech.shape[0]
+        else:
+            speech, speech_lengths = extract_fbank(
+                data_src, data_type=self.data_type, frontend=self.frontend, is_final=True
+            )
+            speech = speech[0, :, :]
 
         # Create two different augmented views for contrastive learning
         speech_aug1 = self._add_noise(speech)
