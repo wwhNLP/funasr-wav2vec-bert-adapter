@@ -16,6 +16,24 @@ from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 
 AUDIO_FORMAT_SETS = set(['flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'wma'])
 
+
+def _load_mono_audio(wav_file, sample_rate):
+    """Decode and normalize audio before applying target-rate length limits."""
+    try:
+        waveform, source_rate = torchaudio.load(wav_file)
+    except (ImportError, RuntimeError):
+        # Recent torchaudio releases require the optional TorchCodec backend.
+        import soundfile
+        wav_file.seek(0)
+        audio, source_rate = soundfile.read(wav_file, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(audio.T.copy())
+    if source_rate != sample_rate:
+        waveform = torchaudio.functional.resample(waveform, source_rate, sample_rate)
+    if waveform.dim() > 1 and waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return waveform
+
+
 def read_tar_file(data):
     """Read a tar file and yield samples.
     Args:
@@ -63,6 +81,34 @@ def read_tar_file(data):
 
     return samples
 
+
+def iter_tar_audio(data):
+    """Yield independent audio members without retaining an entire shard."""
+    path = data['path']
+    try:
+        with tarfile.open(path, "r|*") as tar:
+            while True:
+                member = tar.next()
+                # Python versions before 3.13 also cache TarInfo in stream mode.
+                # We only access the current member, so no index is needed.
+                tar.members.clear()
+                if member is None:
+                    break
+                if not member.isfile():
+                    continue
+                key, extension = os.path.splitext(member.name.replace('\\', '/'))
+                if extension[1:].lower() not in AUDIO_FORMAT_SETS:
+                    continue
+                fp = tar.extractfile(member)
+                if fp is None:
+                    continue
+                with fp:
+                    content = fp.read()
+                yield dict(key=key, wav=content, txt=b'')
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        logging.warning("Skipping unreadable tar shard %s: %s", path, exc)
+
+
 class Shuffler:
     """A simple shuffler for iter datapipe."""
     def __init__(self, shuffler_size=1000, shuffle=True, rng=None):
@@ -95,20 +141,21 @@ class Shuffler:
 class TarFileAndGroupDataPipe(IterDataPipe):
     """
     This DataPipe reads samples from tar files and applies streaming shuffling.
-    The `read_tar_file` function is expected to group samples by key within a single tar file.
+    Audio-only mode streams independent members. Grouped mode preserves pairing
+    of transcripts and audio even when their members are not adjacent.
     """
-    def __init__(self, datapipe, shuffle=False, shuffler_size=1000, seed=None):
+    def __init__(self, datapipe, shuffle=False, shuffler_size=1000, seed=None, audio_only=False):
         self.datapipe = datapipe
         self.shuffle = shuffle
         self.shuffler_size = shuffler_size
         self.seed = seed
+        self.audio_only = audio_only
 
     def __iter__(self):
         shuffler = Shuffler(self.shuffler_size, self.shuffle, random.Random(self.seed))
+        reader = iter_tar_audio if self.audio_only else read_tar_file
         for data in self.datapipe:
-            # 读取一个tar的样本数据
-            samples = read_tar_file(data)
-            for sample in samples:
+            for sample in reader(data):
                 # 添加到shuffler中
                 shuffled_sample = shuffler.add(sample)
                 if shuffled_sample is not None:
@@ -229,7 +276,8 @@ class LargeAudioDataset(IterableDataset):
         target = sample['txt']
 
         wav_file = io.BytesIO(wav_bytes)
-        data_src, fs = torchaudio.load(wav_file)
+        data_src = _load_mono_audio(wav_file, self.fs)
+        fs = self.fs
         
         if data_src.shape[1] < self.min_wav_len or data_src.shape[1] > self.max_wav_len:
             return None
@@ -755,32 +803,19 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         
         wav_file = io.BytesIO(wav_bytes)
         try:
-            try:
-                data_src, fs = torchaudio.load(wav_file)
-            except (ImportError, RuntimeError):
-                # Recent torchaudio versions require the optional TorchCodec backend.
-                import soundfile
-                wav_file.seek(0)
-                audio, fs = soundfile.read(wav_file, dtype="float32", always_2d=True)
-                data_src = torch.from_numpy(audio.T.copy())
+            data_src = _load_mono_audio(wav_file, self.fs)
         except Exception as e:
             logging.warning("Skipping undecodable audio %s: %s", key, e)
             return None
 
-        if fs != self.fs:
-            data_src = torchaudio.functional.resample(data_src, fs, self.fs)
-            fs = self.fs
         if data_src.numel() == 0 or data_src.shape[1] < self.min_wav_len:
             return None
-
-        if data_src.dim() > 1 and data_src.shape[0] > 1:
-            data_src = torch.mean(data_src, dim=0, keepdim=True)
 
         if data_src.shape[1] > self.max_wav_len:
             return None
 
         if self.preprocessor_speech:
-            data_src = self.preprocessor_speech(data_src, fs=fs)
+            data_src = self.preprocessor_speech(data_src, fs=self.fs)
 
         return {
             "speech": data_src.squeeze(0),
@@ -799,11 +834,18 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
             if not hasattr(self, "_fbank_converter"):
                 from .fbank import WaveformToFbank
                 self._fbank_converter = WaveformToFbank(sample_rate=self.fs, **self.kwargs.get("fbank_conf", {}))
-            features = [self._fbank_converter(sample["speech"]) for sample in batch_of_samples]
-            return {
-                "speech": torch.nn.utils.rnn.pad_sequence(features, batch_first=True),
-                "speech_lengths": torch.tensor([len(x) for x in features], dtype=torch.int32),
-            }
+            outputs = {}
+            for speech_key, length_key in (
+                ("speech", "speech_lengths"),
+                ("speech_aug1", "speech_lengths_aug1"),
+                ("speech_aug2", "speech_lengths_aug2"),
+            ):
+                if speech_key not in batch_of_samples[0]:
+                    continue
+                features = [self._fbank_converter(sample[speech_key]) for sample in batch_of_samples]
+                outputs[speech_key] = torch.nn.utils.rnn.pad_sequence(features, batch_first=True)
+                outputs[length_key] = torch.tensor([len(x) for x in features], dtype=torch.int32)
+            return outputs
 
         outputs = {}
         # Group samples by key
@@ -878,6 +920,7 @@ class SelfSupervisedLargeAudioDataset(IterableDataset):
         datapipe = datapipe.tar_file_and_group(
             shuffle=self.is_training, shuffler_size=shuffler_size,
             seed=self.kwargs.get("seed", 0) + self.epoch * 1000003 + self.rank * num_workers + worker_id,
+            audio_only=True,
         )
         datapipe = datapipe.map(self._process_sample)
         datapipe = datapipe.filter(lambda x: x is not None)
@@ -937,14 +980,15 @@ class SelfSupervisedLargeAudioDatasetWithAugmentation(SelfSupervisedLargeAudioDa
         new_length = int(original_length * stretch_factor)
         
         if new_length > 0 and new_length != original_length:
-            speech_for_interp = speech.transpose(0, 1).unsqueeze(0)
+            waveform = speech.ndim == 1
+            speech_for_interp = speech[None, None, :] if waveform else speech.transpose(0, 1).unsqueeze(0)
             interpolated_speech = torch.nn.functional.interpolate(
                 speech_for_interp,
                 size=new_length,
                 mode='linear',
                 align_corners=False
             )
-            speech = interpolated_speech.squeeze(0).transpose(0, 1)
+            speech = interpolated_speech[0, 0] if waveform else interpolated_speech.squeeze(0).transpose(0, 1)
             speech_lengths = torch.tensor([new_length], dtype=torch.int32)
         
         return speech, speech_lengths
@@ -953,11 +997,8 @@ class SelfSupervisedLargeAudioDatasetWithAugmentation(SelfSupervisedLargeAudioDa
         wav_bytes = sample['wav']
         
         wav_file = io.BytesIO(wav_bytes)
-        data_src, fs = torchaudio.load(wav_file)
-
-        # Ensure audio is mono
-        if data_src.dim() > 1 and data_src.shape[0] > 1:
-            data_src = torch.mean(data_src, dim=0, keepdim=True)
+        data_src = _load_mono_audio(wav_file, self.fs)
+        fs = self.fs
 
         if data_src.shape[1] < self.min_wav_len or data_src.shape[1] > self.max_wav_len:
             return None
@@ -965,10 +1006,16 @@ class SelfSupervisedLargeAudioDatasetWithAugmentation(SelfSupervisedLargeAudioDa
         if self.preprocessor_speech:
             data_src = self.preprocessor_speech(data_src, fs=fs)
 
-        speech, speech_lengths = extract_fbank(
-            data_src, data_type=self.data_type, frontend=self.frontend, is_final=True
-        )
-        speech = speech[0, :, :]
+        if self.kwargs.get("feature_type", "waveform") == "fbank":
+            # Keep raw samples for length-based batching. The collator converts
+            # every augmented view once, after waveform augmentation.
+            speech = data_src.squeeze(0)
+            speech_lengths = speech.shape[0]
+        else:
+            speech, speech_lengths = extract_fbank(
+                data_src, data_type=self.data_type, frontend=self.frontend, is_final=True
+            )
+            speech = speech[0, :, :]
 
         # Create two different augmented views for contrastive learning
         speech_aug1 = self._add_noise(speech)

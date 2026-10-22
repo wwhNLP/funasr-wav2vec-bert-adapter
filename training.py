@@ -14,6 +14,7 @@ class PretrainingTrainer(Trainer):
         if self.save_checkpoint_interval % self.accum_grad:
             raise ValueError("save_checkpoint_interval must be divisible by accum_grad.")
         self._target_count = None
+        self._resume_start_step = 0
 
     def train_epoch(self, *args, **kwargs):
         loader = kwargs.get("dataloader_train")
@@ -21,7 +22,18 @@ class PretrainingTrainer(Trainer):
             raise ValueError("The remaining epoch batch count must be divisible by accum_grad.")
         if kwargs.get("start_step", 0) % self.accum_grad:
             raise ValueError("Resume from an optimizer-step boundary (start_step divisible by accum_grad).")
-        return super().train_epoch(*args, **kwargs)
+        self._resume_start_step = kwargs.get("start_step", 0)
+        try:
+            return super().train_epoch(*args, **kwargs)
+        finally:
+            self._resume_start_step = 0
+
+    def save_checkpoint(self, epoch, step=None, **kwargs):
+        if step is not None:
+            # FunASR passes a batch index relative to the resumed iterator, while
+            # the loader expects an absolute offset within the current slice.
+            step += self._resume_start_step
+        return super().save_checkpoint(epoch, step=step, **kwargs)
 
     def forward_step(self, model, batch, loss_dict=None):
         super().forward_step(model, batch, loss_dict)
